@@ -1,5 +1,4 @@
 // src/hooks/useNotifications.js
-// Manages browser notification permission + showing notifications
 
 import { useEffect, useState } from "react";
 
@@ -8,7 +7,7 @@ export function useNotifications() {
     typeof Notification !== "undefined" ? Notification.permission : "denied"
   );
 
-  // Register service worker on mount
+  // Register service worker
   useEffect(() => {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
@@ -17,7 +16,6 @@ export function useNotifications() {
     }
   }, []);
 
-  // Ask user for permission
   async function requestPermission() {
     if (typeof Notification === "undefined") return "denied";
     const result = await Notification.requestPermission();
@@ -25,26 +23,31 @@ export function useNotifications() {
     return result;
   }
 
-  // Show a notification (only if tab is not focused)
   function notify(title, body, tag = "realchat") {
-    if (permission !== "granted") return;
-    if (document.visibilityState === "visible") return; // tab is active, skip
+    // Read directly from browser — never stale
+    const current = typeof Notification !== "undefined"
+      ? Notification.permission
+      : "denied";
 
-    if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-      // Use service worker (works even when tab is closed on mobile)
-      navigator.serviceWorker.ready.then(reg => {
+    if (current !== "granted") return;
+
+    // Only notify if tab is hidden or not focused
+    if (document.visibilityState === "visible" && document.hasFocus()) return;
+
+    navigator.serviceWorker.ready
+      .then(reg => {
         reg.showNotification(title, {
           body,
-          icon:  "/icon.png",
-          badge: "/icon.png",
+          icon:     "/icon.svg",
           tag,
           renotify: true,
         });
+      })
+      .catch(() => {
+        // Fallback if service worker isn't ready
+        try { new Notification(title, { body, icon: "/icon.svg", tag }); }
+        catch {}
       });
-    } else {
-      // Fallback: basic Notification API
-      new Notification(title, { body, icon: "/icon.png", tag });
-    }
   }
 
   return { permission, requestPermission, notify };
