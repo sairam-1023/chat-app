@@ -1,7 +1,3 @@
-// src/components/DMWindow.jsx
-// Private chat window between the logged-in user and one friend.
-// Loads history via REST on mount, receives live messages via WebSocket.
-
 import { useState, useEffect, useRef } from "react";
 import { getDMHistory } from "../api/client";
 
@@ -23,12 +19,11 @@ function fmt(iso) {
 }
 
 export default function DMWindow({ me, friend, sendWS, liveMessages }) {
-  const [history, setHistory]   = useState([]);
-  const [input, setInput]       = useState("");
-  const [loading, setLoading]   = useState(false);
+  const [history, setHistory] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
   const bottomRef = useRef(null);
 
-  // Load history when friend changes
   useEffect(() => {
     setHistory([]);
     setLoading(true);
@@ -38,7 +33,6 @@ export default function DMWindow({ me, friend, sendWS, liveMessages }) {
       .finally(() => setLoading(false));
   }, [friend.id, me.id]);
 
-  // Auto-scroll on new message
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history, liveMessages]);
@@ -47,56 +41,43 @@ export default function DMWindow({ me, friend, sendWS, liveMessages }) {
     e.preventDefault();
     const text = input.trim();
     if (!text) return;
-    // Send over WebSocket — server echoes it back so our liveMessages list updates
     sendWS({ type: "dm", receiver_id: friend.id, content: text });
     setInput("");
   }
 
-  // Combine REST history + live WS messages for this conversation
-  // liveMessages contains ALL messages for this user; filter to this friend only
   const live = liveMessages.filter(m =>
     (m.sender?.id === friend.id && m.receiver_id === me.id) ||
-    (m.sender?.id === me.id     && m.receiver_id === friend.id)
+    (m.sender?.id === me.id && m.receiver_id === friend.id)
   );
-
-  // Deduplicate: history IDs vs live IDs
   const historyIds = new Set(history.map(m => m.id));
   const allMessages = [...history, ...live.filter(m => !historyIds.has(m.id))];
 
   return (
     <div style={s.window}>
-      {/* Header */}
       <div style={s.header}>
         <Avatar user={friend} size={36} />
         <div>
           <div style={s.friendName}>{friend.username}</div>
-          <div style={s.friendSub}>Private conversation · end-to-end private</div>
+          <div style={s.friendSub}>Private conversation</div>
         </div>
       </div>
-
-      {/* Messages */}
       <div style={s.messages}>
-        {loading && <p style={s.center}>Loading messages…</p>}
+        {loading && <p style={s.center}>Loading messages...</p>}
         {!loading && allMessages.length === 0 && (
           <div style={s.emptyState}>
             <div style={{ fontSize:48 }}>👋</div>
-            <p style={{ color:"#64748b", fontSize:15, marginTop:12 }}>
-              Say hello to <strong>{friend.username}</strong>!
-            </p>
+            <p style={{ color:"#64748b", fontSize:15, marginTop:12 }}>Say hello to <strong>{friend.username}</strong>!</p>
             <p style={{ color:"#94a3b8", fontSize:13 }}>This is your private conversation.</p>
           </div>
         )}
-
         {allMessages.map((msg, i) => {
           const isOwn = msg.sender?.id === me.id || msg.sender_id === me.id;
           const sender = msg.sender || (isOwn ? me : friend);
           return (
-            <div key={msg.id ?? `live-${i}`} style={{ ...s.row, ...(isOwn ? s.rowOwn : {}) }}>
+            <div key={msg.id ?? "live-" + i} style={{ ...s.row, ...(isOwn ? s.rowOwn : {}) }}>
               {!isOwn && <Avatar user={sender} size={30} />}
               <div style={{ maxWidth:"68%", display:"flex", flexDirection:"column", alignItems: isOwn ? "flex-end" : "flex-start" }}>
-                <div style={{ ...s.bubble, ...(isOwn ? s.bubbleOwn : s.bubbleOther) }}>
-                  {msg.content}
-                </div>
+                <div style={{ ...s.bubble, ...(isOwn ? s.bubbleOwn : s.bubbleOther) }}>{msg.content}</div>
                 <span style={s.time}>{fmt(msg.created_at)}</span>
               </div>
               {isOwn && <Avatar user={sender} size={30} />}
@@ -105,14 +86,11 @@ export default function DMWindow({ me, friend, sendWS, liveMessages }) {
         })}
         <div ref={bottomRef} />
       </div>
-
-      {/* Input */}
       <form onSubmit={send} style={s.inputRow}>
-        <input style={s.input} value={input}
-          onChange={e => setInput(e.target.value)}
-          placeholder={`Message ${friend.username}…`} autoFocus />
+        <input style={s.input} value={input} onChange={e => setInput(e.target.value)}
+          placeholder={"Message " + friend.username + "..."} autoFocus />
         <button type="submit" disabled={!input.trim()} style={{ ...s.sendBtn, opacity: input.trim() ? 1 : 0.5 }}>
-          Send ↑
+          Send
         </button>
       </form>
     </div>
