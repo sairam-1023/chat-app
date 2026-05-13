@@ -11,6 +11,8 @@
 #   5. WebSocket endpoint (live chat)
 # =============================================================================
 
+import os
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey
@@ -210,7 +212,7 @@ app = FastAPI(title="RealChat API", version="1.0")
 # This middleware adds headers so the browser permits the requests.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["http://localhost:5173", os.getenv("FRONTEND_URL", ""),],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
