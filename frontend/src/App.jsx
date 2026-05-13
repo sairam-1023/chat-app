@@ -1,4 +1,4 @@
-// src/App.jsx  (v3 — with Push Notifications)
+// src/App.jsx  (v4 — black theme + remove friend + push notifications)
 
 import { useState, useEffect, useCallback } from "react";
 import AuthPage   from "./components/AuthPage";
@@ -20,13 +20,11 @@ export default function App() {
 
   const { permission, requestPermission, notify } = useNotifications();
 
-  // ── Toast helper ──────────────────────────────────────────────────────────
   function showToast(msg) {
     setToast(msg);
     setTimeout(() => setToast(""), 4000);
   }
 
-  // ── Fetch friends + pending requests from API ─────────────────────────────
   async function refreshData(currentUser) {
     const u = currentUser || user;
     if (!u) return;
@@ -42,66 +40,50 @@ export default function App() {
     }
   }
 
-  // Run on login and on page load if already logged in
   useEffect(() => {
     if (user) refreshData(user);
   }, [user?.id]);
 
-  // Ask for notification permission 2s after login (non-intrusive)
   useEffect(() => {
     if (user && permission === "default") {
       setTimeout(() => requestPermission(), 2000);
     }
   }, [user?.id]);
 
-  // ── WebSocket message handler ─────────────────────────────────────────────
   const handleWS = useCallback((data) => {
 
-    // ---- Incoming DM ----
     if (data.type === "dm") {
       setLiveMsgs(prev => [...prev, data]);
-      // Show notification only if tab is not focused
-      notify(
-        `💬 ${data.sender?.username}`,
-        data.content,
-        `dm-${data.sender?.id}`
-      );
+      notify(`💬 ${data.sender?.username}`, data.content, `dm-${data.sender?.id}`);
 
-    // ---- Incoming friend request ----
     } else if (data.type === "friend_request") {
       setPending(prev => {
         if (prev.find(r => r.id === data.request_id)) return prev;
         return [...prev, {
-          id:         data.request_id,
-          status:     "pending",
-          sender:     data.from,
-          receiver:   user,
+          id: data.request_id, status:"pending",
+          sender: data.from, receiver: user,
           created_at: new Date().toISOString(),
         }];
       });
       showToast(`📩 ${data.from.username} sent you a friend request`);
-      notify(
-        "👋 New Friend Request",
-        `${data.from.username} wants to connect with you`,
-        `fr-${data.request_id}`
-      );
+      notify("👋 New Friend Request", `${data.from.username} wants to connect`, `fr-${data.request_id}`);
 
-    // ---- Friend request accepted ----
     } else if (data.type === "request_accepted") {
       refreshData(user);
       showToast(`✅ ${data.friend.username} accepted your request!`);
-      notify(
-        "✅ Request Accepted!",
-        `${data.friend.username} accepted your friend request. Say hello!`,
-        `accept-${data.friend.id}`
-      );
+      notify("✅ Request Accepted!", `${data.friend.username} is now your friend`, `accept-${data.friend.id}`);
+
+    } else if (data.type === "friend_removed") {
+      // The other user removed us — update our friends list + close their chat if open
+      refreshData(user);
+      setActive(prev => prev?.id === data.by_user_id ? null : prev);
+      showToast("A friend removed you from their list");
     }
 
   }, [user?.id, permission]);
 
   const { send: sendWS } = useWebSocket(user?.id, handleWS);
 
-  // ── Auth handlers ─────────────────────────────────────────────────────────
   function handleAuth(u) {
     setUser(u);
     localStorage.setItem("chat_user", JSON.stringify(u));
@@ -109,20 +91,15 @@ export default function App() {
   }
 
   function handleLogout() {
-    setUser(null);
-    setFriends([]);
-    setPending([]);
-    setActive(null);
-    setLiveMsgs([]);
+    setUser(null); setFriends([]); setPending([]);
+    setActive(null); setLiveMsgs([]);
     localStorage.removeItem("chat_user");
   }
 
-  // ── Not logged in ─────────────────────────────────────────────────────────
   if (!user) return <AuthPage onAuth={handleAuth} />;
 
-  // ── Logged in ─────────────────────────────────────────────────────────────
   return (
-    <div style={{ display:"flex", height:"100vh", fontFamily:"'Segoe UI',system-ui,sans-serif" }}>
+    <div style={{ display:"flex", height:"100vh", fontFamily:"'Segoe UI',system-ui,sans-serif", background:"#080808" }}>
       <Sidebar
         user={user}
         friends={friends}
@@ -143,25 +120,20 @@ export default function App() {
           />
         ) : (
           <div style={centered}>
-            <div style={{ fontSize:56 }}>🔒</div>
-            <p style={{ fontSize:18, color:"#64748b", marginTop:16 }}>
-              Select a friend to start a private chat
-            </p>
-            <p style={{ fontSize:13, color:"#94a3b8" }}>
-              Only you and your friend can see your messages
-            </p>
+            <div style={emptyIcon}>💬</div>
+            <p style={emptyTitle}>Your messages</p>
+            <p style={emptySub}>Select a friend to start a private conversation</p>
+
             {permission === "default" && (
               <button onClick={requestPermission} style={notifBtn}>
                 🔔 Enable notifications
               </button>
             )}
             {permission === "granted" && (
-              <p style={{ fontSize:12, color:"#22c55e", marginTop:8 }}>
-                ✓ Notifications enabled
-              </p>
+              <p style={{ fontSize:12, color:"#22c55e", marginTop:12 }}>✓ Notifications enabled</p>
             )}
             {permission === "denied" && (
-              <p style={{ fontSize:12, color:"#f87171", marginTop:8 }}>
+              <p style={{ fontSize:12, color:"#f87171", marginTop:12 }}>
                 Notifications blocked — enable in browser settings
               </p>
             )}
@@ -169,29 +141,14 @@ export default function App() {
         )}
       </main>
 
-      {/* Toast */}
       {toast && <div style={toastStyle}>{toast}</div>}
     </div>
   );
 }
 
-const centered = {
-  display:"flex", flexDirection:"column", alignItems:"center",
-  justifyContent:"center", height:"100%", textAlign:"center", padding:24,
-};
-
-const notifBtn = {
-  marginTop:16, padding:"10px 20px",
-  background:"#6366f1", color:"#fff",
-  border:"none", borderRadius:8,
-  fontSize:14, fontWeight:600, cursor:"pointer",
-};
-
-const toastStyle = {
-  position:"fixed", bottom:24, right:24,
-  background:"#1e293b", color:"#f1f5f9",
-  padding:"12px 20px", borderRadius:10,
-  fontSize:14, fontWeight:500,
-  boxShadow:"0 4px 16px rgba(0,0,0,0.2)",
-  zIndex:9999, maxWidth:320,
-};
+const centered   = { display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100%", textAlign:"center", padding:24 };
+const emptyIcon  = { fontSize:52, filter:"drop-shadow(0 0 30px rgba(99,102,241,0.3))", marginBottom:16 };
+const emptyTitle = { fontSize:20, fontWeight:700, color:"#fff", margin:"0 0 8px", letterSpacing:"-0.3px" };
+const emptySub   = { fontSize:14, color:"#444", margin:0 };
+const notifBtn   = { marginTop:20, padding:"10px 22px", background:"#6366f122", color:"#a5b4fc", border:"1px solid #6366f133", borderRadius:8, fontSize:14, fontWeight:600, cursor:"pointer" };
+const toastStyle = { position:"fixed", bottom:24, right:24, background:"#111", color:"#e5e5e5", border:"1px solid #1a1a1a", padding:"12px 20px", borderRadius:12, fontSize:13, fontWeight:500, boxShadow:"0 8px 32px rgba(0,0,0,0.6)", zIndex:9999, maxWidth:320 };

@@ -1,14 +1,4 @@
-# =============================================================================
-# BACKEND: main.py  (v2 — Private DMs + Friend Requests)
-# Stack: FastAPI + SQLite + WebSockets
-#
-# New features vs v1:
-#   - FriendRequest table: pending / accepted / rejected states
-#   - DirectMessage table: private messages between exactly 2 users
-#   - No more public rooms — everything is private DM only
-#   - WebSocket per USER (not per room) — server routes to recipient
-#   - Real-time notifications: friend requests + accepts pushed via WS
-# =============================================================================
+# backend/main.py  (v4 — adds remove friend)
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,12 +34,6 @@ class User(Base):
 
 
 class FriendRequest(Base):
-    """
-    Tracks friend requests between users.
-    status: "pending" → user hasn't responded yet
-            "accepted" → both users can now DM each other
-            "rejected" → receiver declined
-    """
     __tablename__ = "friend_requests"
     id          = Column(Integer, primary_key=True, index=True)
     sender_id   = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -63,10 +47,6 @@ class FriendRequest(Base):
 
 
 class DirectMessage(Base):
-    """
-    A private message between exactly two users.
-    Only created after their friend request is accepted.
-    """
     __tablename__ = "direct_messages"
     id          = Column(Integer, primary_key=True, index=True)
     sender_id   = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -126,9 +106,7 @@ class SendMessageBody(BaseModel):
     content: str
 
 # =============================================================================
-# WEBSOCKET MANAGER — keyed by user_id (not room)
-# Each logged-in user maintains ONE persistent WS connection.
-# Server pushes DMs, friend requests, and accept notifications directly.
+# WEBSOCKET MANAGER
 # =============================================================================
 
 class ConnectionManager:
@@ -156,7 +134,7 @@ manager = ConnectionManager()
 # APP
 # =============================================================================
 
-app = FastAPI(title="RealChat DM API", version="2.0")
+app = FastAPI(title="RealChat API", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -193,7 +171,7 @@ def are_friends(a: int, b: int, db: Session) -> bool:
 
 @app.get("/")
 def root():
-    return {"status": "RealChat DM API v2"}
+    return {"status": "RealChat API v4"}
 
 @app.post("/register", response_model=UserOut)
 def register(data: UserRegister, db: Session = Depends(get_db)):
@@ -211,12 +189,11 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
     return u
 
 # =============================================================================
-# USER SEARCH
+# USERS
 # =============================================================================
 
 @app.get("/users/search", response_model=List[UserOut])
 def search_users(q: str, me: int, db: Session = Depends(get_db)):
-    """Search users by username (excluding yourself)"""
     return db.query(User).filter(User.username.ilike(f"%{q}%"), User.id != me).limit(10).all()
 
 # =============================================================================
@@ -227,10 +204,8 @@ def search_users(q: str, me: int, db: Session = Depends(get_db)):
 async def send_request(body: SendRequestBody, me: int, db: Session = Depends(get_db)):
     sender   = db.query(User).filter(User.id == me).first()
     receiver = db.query(User).filter(User.username == body.username).first()
-    if not receiver:
-        raise HTTPException(404, "User not found")
-    if receiver.id == me:
-        raise HTTPException(400, "Cannot add yourself")
+    if not receiver:        raise HTTPException(404, "User not found")
+    if receiver.id == me:   raise HTTPException(400, "Cannot add yourself")
 
     existing = db.query(FriendRequest).filter(
         ((FriendRequest.sender_id == me) & (FriendRequest.receiver_id == receiver.id)) |
@@ -238,8 +213,8 @@ async def send_request(body: SendRequestBody, me: int, db: Session = Depends(get
     ).first()
 
     if existing:
-        if existing.status == "accepted":  raise HTTPException(400, "Already friends")
-        if existing.status == "pending":   raise HTTPException(400, "Request already sent")
+        if existing.status == "accepted": raise HTTPException(400, "Already friends")
+        if existing.status == "pending":  raise HTTPException(400, "Request already sent")
         existing.status = "pending"; existing.updated_at = datetime.utcnow()
         db.commit(); db.refresh(existing); fr = existing
     else:
@@ -247,18 +222,14 @@ async def send_request(body: SendRequestBody, me: int, db: Session = Depends(get
         db.add(fr); db.commit(); db.refresh(fr)
 
     fr = db.query(FriendRequest).filter(FriendRequest.id == fr.id).first()
-
-    # Push notification to receiver in real-time
     await manager.send_to(receiver.id, {
-        "type":       "friend_request",
-        "request_id": fr.id,
-        "from":       {"id": sender.id, "username": sender.username, "avatar_color": sender.avatar_color},
+        "type": "friend_request", "request_id": fr.id,
+        "from": {"id": sender.id, "username": sender.username, "avatar_color": sender.avatar_color},
     })
     return fr
 
 @app.get("/friend-requests/pending", response_model=List[FriendRequestOut])
 def pending_requests(me: int, db: Session = Depends(get_db)):
-    """All incoming pending requests for me"""
     return db.query(FriendRequest).filter(
         FriendRequest.receiver_id == me, FriendRequest.status == "pending"
     ).all()
@@ -273,7 +244,7 @@ async def accept(rid: int, me: int, db: Session = Depends(get_db)):
     fr = db.query(FriendRequest).filter(FriendRequest.id == rid).first()
     accepter = db.query(User).filter(User.id == me).first()
     await manager.send_to(fr.sender_id, {
-        "type":   "request_accepted",
+        "type": "request_accepted",
         "friend": {"id": accepter.id, "username": accepter.username, "avatar_color": accepter.avatar_color},
     })
     return fr
@@ -288,7 +259,6 @@ def reject(rid: int, me: int, db: Session = Depends(get_db)):
 
 @app.get("/friends", response_model=List[UserOut])
 def get_friends(me: int, db: Session = Depends(get_db)):
-    """All accepted friends — these are the users I can DM"""
     sent     = db.query(FriendRequest).filter(FriendRequest.sender_id   == me, FriendRequest.status == "accepted").all()
     received = db.query(FriendRequest).filter(FriendRequest.receiver_id == me, FriendRequest.status == "accepted").all()
     friends, seen = [], set()
@@ -299,12 +269,35 @@ def get_friends(me: int, db: Session = Depends(get_db)):
     return friends
 
 # =============================================================================
+# REMOVE FRIEND  ← NEW
+# Deletes the accepted friend request between two users.
+# Also notifies the other user via WebSocket so their sidebar updates live.
+# =============================================================================
+
+@app.delete("/friends/{friend_id}")
+async def remove_friend(friend_id: int, me: int, db: Session = Depends(get_db)):
+    fr = db.query(FriendRequest).filter(
+        FriendRequest.status == "accepted",
+        ((FriendRequest.sender_id == me)        & (FriendRequest.receiver_id == friend_id)) |
+        ((FriendRequest.sender_id == friend_id) & (FriendRequest.receiver_id == me))
+    ).first()
+    if not fr:
+        raise HTTPException(404, "Friend relationship not found")
+    db.delete(fr)
+    db.commit()
+    # Notify the other user so their friends list refreshes
+    await manager.send_to(friend_id, {
+        "type":      "friend_removed",
+        "by_user_id": me,
+    })
+    return {"status": "removed"}
+
+# =============================================================================
 # DIRECT MESSAGES
 # =============================================================================
 
 @app.get("/dm/{other_id}", response_model=List[DirectMessageOut])
 def get_history(other_id: int, me: int, db: Session = Depends(get_db)):
-    """Load chat history between me and other_id. Blocked if not friends."""
     if not are_friends(me, other_id, db):
         raise HTTPException(403, "Not friends")
     return db.query(DirectMessage).filter(
@@ -313,7 +306,7 @@ def get_history(other_id: int, me: int, db: Session = Depends(get_db)):
     ).order_by(DirectMessage.created_at.asc()).limit(50).all()
 
 # =============================================================================
-# WEBSOCKET — one connection per user
+# WEBSOCKET
 # =============================================================================
 
 @app.websocket("/ws/{user_id}")
@@ -344,8 +337,8 @@ async def ws_endpoint(websocket: WebSocket, user_id: int):
                     "created_at": msg.created_at.isoformat(), "receiver_id": rid,
                     "sender": {"id": user.id, "username": user.username, "avatar_color": user.avatar_color},
                 }
-                await manager.send_to(rid, payload)                           # push to recipient
-                await websocket.send_text(json.dumps(payload, default=str))   # echo to sender
+                await manager.send_to(rid, payload)
+                await websocket.send_text(json.dumps(payload, default=str))
 
             elif data.get("type") == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
