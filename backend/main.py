@@ -1,17 +1,14 @@
 # =============================================================================
-# BACKEND: main.py
-# Stack: FastAPI + SQLite (via SQLAlchemy) + WebSockets
-# Python 3.11+
+# BACKEND: main.py  (v2 — Private DMs + Friend Requests)
+# Stack: FastAPI + SQLite + WebSockets
 #
-# Responsibilities:
-#   1. SQLite database schema (users, rooms, messages)
-#   2. Pydantic schemas (request/response validation)
-#   3. WebSocket connection manager (real-time messaging)
-#   4. REST endpoints (register, login, rooms, message history)
-#   5. WebSocket endpoint (live chat)
+# New features vs v1:
+#   - FriendRequest table: pending / accepted / rejected states
+#   - DirectMessage table: private messages between exactly 2 users
+#   - No more public rooms — everything is private DM only
+#   - WebSocket per USER (not per room) — server routes to recipient
+#   - Real-time notifications: friend requests + accepts pushed via WS
 # =============================================================================
-
-import os
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,97 +18,75 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional, List
-import json
-import hashlib
-
-# =============================================================================
-# SECTION 1: DATABASE SETUP
-# SQLite stores everything in chat.db — a single file on disk.
-# SQLAlchemy is the ORM: it translates Python classes into SQL tables.
-# =============================================================================
+import json, hashlib, os
 
 DATABASE_URL = "sqlite:///./chat.db"
-
-# create_engine opens the connection to the .db file.
-# check_same_thread=False is required for SQLite + FastAPI (multi-threaded).
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-
-# SessionLocal is a factory. Each HTTP request gets its own DB session.
+engine       = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# All models inherit from Base so SQLAlchemy knows about them.
-Base = declarative_base()
-
+Base         = declarative_base()
 
 # =============================================================================
-# SECTION 2: DATABASE MODELS (SQLite tables)
-# Each class = one table. Each Column = one column in that table.
+# MODELS
 # =============================================================================
 
 class User(Base):
-    """
-    The 'users' table.
-    Stores every registered user. Passwords are SHA-256 hashed.
-    """
     __tablename__ = "users"
-
     id           = Column(Integer, primary_key=True, index=True)
     username     = Column(String(50), unique=True, nullable=False, index=True)
-    password     = Column(String(64), nullable=False)       # SHA-256 hex digest
-    avatar_color = Column(String(20), default="indigo")     # UI color for avatar
+    password     = Column(String(64), nullable=False)
+    avatar_color = Column(String(20), default="indigo")
     created_at   = Column(DateTime, default=datetime.utcnow)
 
-    # ORM relationship: user.messages gives all messages by this user
-    messages     = relationship("Message", back_populates="user")
+    sent_requests     = relationship("FriendRequest", foreign_keys="FriendRequest.sender_id",   back_populates="sender")
+    received_requests = relationship("FriendRequest", foreign_keys="FriendRequest.receiver_id", back_populates="receiver")
+    sent_messages     = relationship("DirectMessage", foreign_keys="DirectMessage.sender_id",   back_populates="sender")
+    received_messages = relationship("DirectMessage", foreign_keys="DirectMessage.receiver_id", back_populates="receiver")
 
 
-class Room(Base):
+class FriendRequest(Base):
     """
-    The 'rooms' table.
-    A room is a named channel. Users join rooms and exchange messages there.
+    Tracks friend requests between users.
+    status: "pending" → user hasn't responded yet
+            "accepted" → both users can now DM each other
+            "rejected" → receiver declined
     """
-    __tablename__ = "rooms"
-
+    __tablename__ = "friend_requests"
     id          = Column(Integer, primary_key=True, index=True)
-    name        = Column(String(100), unique=True, nullable=False)
-    description = Column(String(255), default="")
+    sender_id   = Column(Integer, ForeignKey("users.id"), nullable=False)
+    receiver_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    status      = Column(String(20), default="pending")
+    created_at  = Column(DateTime, default=datetime.utcnow)
+    updated_at  = Column(DateTime, default=datetime.utcnow)
+
+    sender   = relationship("User", foreign_keys=[sender_id],   back_populates="sent_requests")
+    receiver = relationship("User", foreign_keys=[receiver_id], back_populates="received_requests")
+
+
+class DirectMessage(Base):
+    """
+    A private message between exactly two users.
+    Only created after their friend request is accepted.
+    """
+    __tablename__ = "direct_messages"
+    id          = Column(Integer, primary_key=True, index=True)
+    sender_id   = Column(Integer, ForeignKey("users.id"), nullable=False)
+    receiver_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content     = Column(Text, nullable=False)
     created_at  = Column(DateTime, default=datetime.utcnow)
 
-    messages    = relationship("Message", back_populates="room")
+    sender   = relationship("User", foreign_keys=[sender_id],   back_populates="sent_messages")
+    receiver = relationship("User", foreign_keys=[receiver_id], back_populates="received_messages")
 
 
-class Message(Base):
-    """
-    The 'messages' table.
-    Every chat message. Foreign keys link it to a user and a room.
-    """
-    __tablename__ = "messages"
-
-    id         = Column(Integer, primary_key=True, index=True)
-    content    = Column(Text, nullable=False)
-    user_id    = Column(Integer, ForeignKey("users.id"), nullable=False)
-    room_id    = Column(Integer, ForeignKey("rooms.id"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    user       = relationship("User", back_populates="messages")
-    room       = relationship("Room", back_populates="messages")
-
-
-# Create all tables if they don't exist (runs once on startup)
 Base.metadata.create_all(bind=engine)
 
-
 # =============================================================================
-# SECTION 3: PYDANTIC SCHEMAS
-# FastAPI uses Pydantic to validate incoming JSON and serialize outgoing JSON.
-# These are DIFFERENT from SQLAlchemy models:
-#   - SQLAlchemy models = database layer
-#   - Pydantic schemas = HTTP layer (what goes in/out of the API)
+# SCHEMAS
 # =============================================================================
 
 class UserRegister(BaseModel):
-    username:     str
-    password:     str
+    username: str
+    password: str
     avatar_color: Optional[str] = "indigo"
 
 class UserLogin(BaseModel):
@@ -119,297 +94,266 @@ class UserLogin(BaseModel):
     password: str
 
 class UserOut(BaseModel):
-    id:           int
-    username:     str
+    id: int
+    username: str
     avatar_color: str
-
-    class Config:
-        from_attributes = True  # lets Pydantic read SQLAlchemy model objects
-
-class RoomCreate(BaseModel):
-    name:        str
-    description: Optional[str] = ""
-
-class RoomOut(BaseModel):
-    id:          int
-    name:        str
-    description: str
-
     class Config:
         from_attributes = True
 
-class MessageOut(BaseModel):
-    id:         int
-    content:    str
+class FriendRequestOut(BaseModel):
+    id: int
+    sender: UserOut
+    receiver: UserOut
+    status: str
     created_at: datetime
-    user:       UserOut
-    room_id:    int
-
     class Config:
         from_attributes = True
 
+class DirectMessageOut(BaseModel):
+    id: int
+    sender: UserOut
+    receiver_id: int
+    content: str
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class SendRequestBody(BaseModel):
+    username: str
+
+class SendMessageBody(BaseModel):
+    receiver_id: int
+    content: str
 
 # =============================================================================
-# SECTION 4: WEBSOCKET CONNECTION MANAGER
-#
-# This is the heart of real-time chat.
-#
-# How WebSockets differ from HTTP:
-#   HTTP:      Client sends request → Server responds → connection closes
-#   WebSocket: Client connects once → both sides send/receive freely → stays open
-#
-# We maintain a dict:  { room_id: [WebSocket, WebSocket, ...] }
-# When any message arrives, we broadcast it to ALL sockets in that room.
-# That's how every user sees new messages instantly without polling.
+# WEBSOCKET MANAGER — keyed by user_id (not room)
+# Each logged-in user maintains ONE persistent WS connection.
+# Server pushes DMs, friend requests, and accept notifications directly.
 # =============================================================================
 
 class ConnectionManager:
     def __init__(self):
-        # rooms: { room_id (int) : [ active WebSocket connections ] }
-        self.rooms: dict[int, list[WebSocket]] = {}
+        self.connections: dict[int, WebSocket] = {}
 
-    async def connect(self, websocket: WebSocket, room_id: int):
-        """Accept and register a new WebSocket connection for a room."""
-        await websocket.accept()
-        if room_id not in self.rooms:
-            self.rooms[room_id] = []
-        self.rooms[room_id].append(websocket)
+    async def connect(self, ws: WebSocket, user_id: int):
+        await ws.accept()
+        self.connections[user_id] = ws
 
-    def disconnect(self, websocket: WebSocket, room_id: int):
-        """Remove a WebSocket when the client disconnects."""
-        if room_id in self.rooms:
+    def disconnect(self, user_id: int):
+        self.connections.pop(user_id, None)
+
+    async def send_to(self, user_id: int, payload: dict):
+        ws = self.connections.get(user_id)
+        if ws:
             try:
-                self.rooms[room_id].remove(websocket)
-            except ValueError:
-                pass
-
-    async def broadcast(self, message: dict, room_id: int):
-        """Send a JSON payload to every connected client in a room."""
-        if room_id not in self.rooms:
-            return
-        dead = []
-        for ws in self.rooms[room_id]:
-            try:
-                await ws.send_text(json.dumps(message, default=str))
+                await ws.send_text(json.dumps(payload, default=str))
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.rooms[room_id].remove(ws)
-
+                self.disconnect(user_id)
 
 manager = ConnectionManager()
 
-
 # =============================================================================
-# SECTION 5: FASTAPI APP + CORS MIDDLEWARE
+# APP
 # =============================================================================
 
-app = FastAPI(title="RealChat API", version="1.0")
+app = FastAPI(title="RealChat DM API", version="2.0")
 
-# CORS (Cross-Origin Resource Sharing):
-# React dev server runs on :5173, API on :8000.
-# Browsers block cross-origin requests by default.
-# This middleware adds headers so the browser permits the requests.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173","https://chat-app-sigma-ten-81.vercel.app", os.getenv("FRONTEND_URL", ""),],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        os.getenv("FRONTEND_URL", ""),
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# =============================================================================
-# SECTION 6: DEPENDENCY — DATABASE SESSION
-# Declares a reusable way to get a DB session per request.
-# FastAPI closes the session automatically after each request.
-# =============================================================================
-
 def get_db():
     db = SessionLocal()
     try:
-        yield db          # 'yield' turns this into a context manager
+        yield db
     finally:
-        db.close()        # always runs, even if an exception was raised
+        db.close()
 
+def hash_pw(p: str) -> str:
+    return hashlib.sha256(p.encode()).hexdigest()
 
-def hash_pw(password: str) -> str:
-    """SHA-256 hash. Use bcrypt in production."""
-    return hashlib.sha256(password.encode()).hexdigest()
-
+def are_friends(a: int, b: int, db: Session) -> bool:
+    return db.query(FriendRequest).filter(
+        FriendRequest.status == "accepted",
+        ((FriendRequest.sender_id == a) & (FriendRequest.receiver_id == b)) |
+        ((FriendRequest.sender_id == b) & (FriendRequest.receiver_id == a))
+    ).first() is not None
 
 # =============================================================================
-# SECTION 7: REST ENDPOINTS
-# These are standard HTTP endpoints (not real-time).
-# Used for: auth, fetching room list, loading message history.
+# AUTH
 # =============================================================================
 
 @app.get("/")
 def root():
-    return {"status": "RealChat API is running"}
-
-
-# ---- Auth ----
+    return {"status": "RealChat DM API v2"}
 
 @app.post("/register", response_model=UserOut)
 def register(data: UserRegister, db: Session = Depends(get_db)):
-    """
-    POST /register  { username, password, avatar_color }
-    Creates a new user account. Returns the user (no password).
-    """
     if db.query(User).filter(User.username == data.username).first():
-        raise HTTPException(status_code=400, detail="Username already taken")
-    user = User(
-        username=data.username,
-        password=hash_pw(data.password),
-        avatar_color=data.avatar_color,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)   # reload from DB to get the auto-generated id
-    return user
-
+        raise HTTPException(400, "Username already taken")
+    u = User(username=data.username, password=hash_pw(data.password), avatar_color=data.avatar_color)
+    db.add(u); db.commit(); db.refresh(u)
+    return u
 
 @app.post("/login", response_model=UserOut)
 def login(data: UserLogin, db: Session = Depends(get_db)):
-    """
-    POST /login  { username, password }
-    Returns user if credentials match.
-    NOTE: In production, return a signed JWT token here instead.
-    """
-    user = db.query(User).filter(User.username == data.username).first()
-    if not user or user.password != hash_pw(data.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return user
-
-
-# ---- Rooms ----
-
-@app.get("/rooms", response_model=List[RoomOut])
-def list_rooms(db: Session = Depends(get_db)):
-    """GET /rooms — returns all chat rooms"""
-    return db.query(Room).all()
-
-
-@app.post("/rooms", response_model=RoomOut)
-def create_room(data: RoomCreate, db: Session = Depends(get_db)):
-    """POST /rooms  { name, description }  — creates a new room"""
-    if db.query(Room).filter(Room.name == data.name).first():
-        raise HTTPException(status_code=400, detail="Room name already exists")
-    room = Room(name=data.name, description=data.description)
-    db.add(room)
-    db.commit()
-    db.refresh(room)
-    return room
-
-
-# ---- Messages ----
-
-@app.get("/rooms/{room_id}/messages", response_model=List[MessageOut])
-def get_messages(room_id: int, limit: int = 50, db: Session = Depends(get_db)):
-    """
-    GET /rooms/{room_id}/messages?limit=50
-    Returns message history for a room (newest last).
-    React calls this when you switch rooms so you see past messages.
-    """
-    msgs = (
-        db.query(Message)
-        .filter(Message.room_id == room_id)
-        .order_by(Message.created_at.asc())
-        .limit(limit)
-        .all()
-    )
-    return msgs
-
+    u = db.query(User).filter(User.username == data.username).first()
+    if not u or u.password != hash_pw(data.password):
+        raise HTTPException(401, "Invalid credentials")
+    return u
 
 # =============================================================================
-# SECTION 8: WEBSOCKET ENDPOINT — real-time message engine
-#
-# URL pattern:  ws://localhost:8000/ws/{room_id}/{user_id}
-#
-# Lifecycle:
-#   1. Client opens WebSocket to this URL (one per room the user is in)
-#   2. manager.connect() accepts and registers it
-#   3. A "joined" system message is broadcast to all room members
-#   4. Infinite loop: await message from THIS client
-#   5. On message: save to SQLite → broadcast JSON to ALL clients in room
-#   6. On disconnect: remove socket → broadcast "left" system message
+# USER SEARCH
 # =============================================================================
 
-@app.websocket("/ws/{room_id}/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: int, user_id: int):
-    await manager.connect(websocket, room_id)
+@app.get("/users/search", response_model=List[UserOut])
+def search_users(q: str, me: int, db: Session = Depends(get_db)):
+    """Search users by username (excluding yourself)"""
+    return db.query(User).filter(User.username.ilike(f"%{q}%"), User.id != me).limit(10).all()
+
+# =============================================================================
+# FRIEND REQUESTS
+# =============================================================================
+
+@app.post("/friend-requests", response_model=FriendRequestOut)
+async def send_request(body: SendRequestBody, me: int, db: Session = Depends(get_db)):
+    sender   = db.query(User).filter(User.id == me).first()
+    receiver = db.query(User).filter(User.username == body.username).first()
+    if not receiver:
+        raise HTTPException(404, "User not found")
+    if receiver.id == me:
+        raise HTTPException(400, "Cannot add yourself")
+
+    existing = db.query(FriendRequest).filter(
+        ((FriendRequest.sender_id == me) & (FriendRequest.receiver_id == receiver.id)) |
+        ((FriendRequest.sender_id == receiver.id) & (FriendRequest.receiver_id == me))
+    ).first()
+
+    if existing:
+        if existing.status == "accepted":  raise HTTPException(400, "Already friends")
+        if existing.status == "pending":   raise HTTPException(400, "Request already sent")
+        existing.status = "pending"; existing.updated_at = datetime.utcnow()
+        db.commit(); db.refresh(existing); fr = existing
+    else:
+        fr = FriendRequest(sender_id=me, receiver_id=receiver.id)
+        db.add(fr); db.commit(); db.refresh(fr)
+
+    fr = db.query(FriendRequest).filter(FriendRequest.id == fr.id).first()
+
+    # Push notification to receiver in real-time
+    await manager.send_to(receiver.id, {
+        "type":       "friend_request",
+        "request_id": fr.id,
+        "from":       {"id": sender.id, "username": sender.username, "avatar_color": sender.avatar_color},
+    })
+    return fr
+
+@app.get("/friend-requests/pending", response_model=List[FriendRequestOut])
+def pending_requests(me: int, db: Session = Depends(get_db)):
+    """All incoming pending requests for me"""
+    return db.query(FriendRequest).filter(
+        FriendRequest.receiver_id == me, FriendRequest.status == "pending"
+    ).all()
+
+@app.post("/friend-requests/{rid}/accept", response_model=FriendRequestOut)
+async def accept(rid: int, me: int, db: Session = Depends(get_db)):
+    fr = db.query(FriendRequest).filter(FriendRequest.id == rid).first()
+    if not fr or fr.receiver_id != me: raise HTTPException(403, "Not your request")
+    if fr.status != "pending":         raise HTTPException(400, f"Already {fr.status}")
+    fr.status = "accepted"; fr.updated_at = datetime.utcnow()
+    db.commit(); db.refresh(fr)
+    fr = db.query(FriendRequest).filter(FriendRequest.id == rid).first()
+    accepter = db.query(User).filter(User.id == me).first()
+    await manager.send_to(fr.sender_id, {
+        "type":   "request_accepted",
+        "friend": {"id": accepter.id, "username": accepter.username, "avatar_color": accepter.avatar_color},
+    })
+    return fr
+
+@app.post("/friend-requests/{rid}/reject", response_model=FriendRequestOut)
+def reject(rid: int, me: int, db: Session = Depends(get_db)):
+    fr = db.query(FriendRequest).filter(FriendRequest.id == rid).first()
+    if not fr or fr.receiver_id != me: raise HTTPException(403, "Not your request")
+    fr.status = "rejected"; fr.updated_at = datetime.utcnow()
+    db.commit(); db.refresh(fr)
+    return db.query(FriendRequest).filter(FriendRequest.id == rid).first()
+
+@app.get("/friends", response_model=List[UserOut])
+def get_friends(me: int, db: Session = Depends(get_db)):
+    """All accepted friends — these are the users I can DM"""
+    sent     = db.query(FriendRequest).filter(FriendRequest.sender_id   == me, FriendRequest.status == "accepted").all()
+    received = db.query(FriendRequest).filter(FriendRequest.receiver_id == me, FriendRequest.status == "accepted").all()
+    friends, seen = [], set()
+    for fr in sent:
+        if fr.receiver_id not in seen: friends.append(fr.receiver); seen.add(fr.receiver_id)
+    for fr in received:
+        if fr.sender_id not in seen: friends.append(fr.sender); seen.add(fr.sender_id)
+    return friends
+
+# =============================================================================
+# DIRECT MESSAGES
+# =============================================================================
+
+@app.get("/dm/{other_id}", response_model=List[DirectMessageOut])
+def get_history(other_id: int, me: int, db: Session = Depends(get_db)):
+    """Load chat history between me and other_id. Blocked if not friends."""
+    if not are_friends(me, other_id, db):
+        raise HTTPException(403, "Not friends")
+    return db.query(DirectMessage).filter(
+        ((DirectMessage.sender_id == me)       & (DirectMessage.receiver_id == other_id)) |
+        ((DirectMessage.sender_id == other_id) & (DirectMessage.receiver_id == me))
+    ).order_by(DirectMessage.created_at.asc()).limit(50).all()
+
+# =============================================================================
+# WEBSOCKET — one connection per user
+# =============================================================================
+
+@app.websocket("/ws/{user_id}")
+async def ws_endpoint(websocket: WebSocket, user_id: int):
+    await manager.connect(websocket, user_id)
     db = SessionLocal()
-
+    user = None
     try:
         user = db.query(User).filter(User.id == user_id).first()
-        room = db.query(Room).filter(Room.id == room_id).first()
+        if not user:
+            await websocket.close(code=4004); return
 
-        if not user or not room:
-            await websocket.close(code=4004)
-            return
+        await websocket.send_text(json.dumps({"type": "connected"}))
 
-        # Announce arrival
-        await manager.broadcast({
-            "type":      "system",
-            "text":      f"{user.username} joined #{room.name}",
-            "timestamp": datetime.utcnow().isoformat(),
-        }, room_id)
-
-        # ---- Message loop: runs forever until client disconnects ----
         while True:
-            raw  = await websocket.receive_text()   # blocks until message arrives
-            data = json.loads(raw)
+            data = json.loads(await websocket.receive_text())
 
-            # Persist to SQLite
-            msg = Message(content=data["content"], user_id=user_id, room_id=room_id)
-            db.add(msg)
-            db.commit()
-            db.refresh(msg)
+            if data.get("type") == "dm":
+                rid     = data["receiver_id"]
+                content = data["content"]
+                if not are_friends(user_id, rid, db):
+                    await websocket.send_text(json.dumps({"type": "error", "text": "Not friends"}))
+                    continue
+                msg = DirectMessage(sender_id=user_id, receiver_id=rid, content=content)
+                db.add(msg); db.commit(); db.refresh(msg)
+                payload = {
+                    "type": "dm", "id": msg.id, "content": msg.content,
+                    "created_at": msg.created_at.isoformat(), "receiver_id": rid,
+                    "sender": {"id": user.id, "username": user.username, "avatar_color": user.avatar_color},
+                }
+                await manager.send_to(rid, payload)                           # push to recipient
+                await websocket.send_text(json.dumps(payload, default=str))   # echo to sender
 
-            # Broadcast to everyone in the room (including the sender)
-            await manager.broadcast({
-                "type":       "message",
-                "id":         msg.id,
-                "content":    msg.content,
-                "created_at": msg.created_at.isoformat(),
-                "room_id":    room_id,
-                "user": {
-                    "id":           user.id,
-                    "username":     user.username,
-                    "avatar_color": user.avatar_color,
-                },
-            }, room_id)
+            elif data.get("type") == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
 
     except WebSocketDisconnect:
-        manager.disconnect(websocket, room_id)
-        if user:
-            await manager.broadcast({
-                "type":      "system",
-                "text":      f"{user.username} left the room",
-                "timestamp": datetime.utcnow().isoformat(),
-            }, room_id)
+        manager.disconnect(user_id)
     finally:
         db.close()
-
-
-# =============================================================================
-# SECTION 9: STARTUP — seed default rooms
-# =============================================================================
-
-@app.on_event("startup")
-def seed():
-    db = SessionLocal()
-    for name, desc in [
-        ("general", "General discussion for everyone"),
-        ("tech",    "Engineering, code, and all things tech"),
-        ("random",  "Memes, off-topic, anything goes"),
-    ]:
-        if not db.query(Room).filter(Room.name == name).first():
-            db.add(Room(name=name, description=desc))
-    db.commit()
-    db.close()
-
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,276 +1,181 @@
-// =============================================================================
 // src/components/Sidebar.jsx
-//
-// Left panel showing:
-//   - Current user info + logout button
-//   - List of all rooms (fetched from GET /rooms)
-//   - "New room" form to create a room (POST /rooms)
-//   - Online indicator (green dot)
-//
-// Props:
-//   user         — the logged-in user object
-//   rooms        — array of room objects from the API
-//   activeRoom   — currently selected room
-//   onRoomSelect — called when user clicks a room
-//   onRoomsChange — called after a new room is created (triggers refetch)
-//   onLogout     — called when user clicks Logout
-// =============================================================================
-
+// Shows: friends list, pending requests badge, add-friend search, logout
 import { useState } from "react";
-import { createRoom } from "../api/client";
+import { searchUsers, sendFriendRequest, acceptRequest, rejectRequest } from "../api/client";
 
-const COLOR_MAP = {
-  indigo:  { bg: "#e0e7ff", text: "#3730a3" },
-  rose:    { bg: "#ffe4e6", text: "#9f1239" },
-  emerald: { bg: "#d1fae5", text: "#065f46" },
-  amber:   { bg: "#fef3c7", text: "#92400e" },
-  sky:     { bg: "#e0f2fe", text: "#0c4a6e" },
-  violet:  { bg: "#ede9fe", text: "#4c1d95" },
-  orange:  { bg: "#ffedd5", text: "#7c2d12" },
-};
+const CMAP = { indigo:"#e0e7ff",rose:"#ffe4e6",emerald:"#d1fae5",amber:"#fef3c7",sky:"#e0f2fe",violet:"#ede9fe",orange:"#ffedd5" };
+const CTEXT= { indigo:"#3730a3",rose:"#9f1239",emerald:"#065f46",amber:"#92400e",sky:"#0c4a6e",violet:"#4c1d95",orange:"#7c2d12" };
 
-const ROOM_ICONS = ["#", "⚡", "🎯", "🔥", "💡", "🛸", "🎸"];
+function Avatar({ user, size = 34 }) {
+  const bg   = CMAP[user.avatar_color] || CMAP.indigo;
+  const col  = CTEXT[user.avatar_color] || CTEXT.indigo;
+  return (
+    <div style={{ width:size, height:size, borderRadius:"50%", background:bg, color:col,
+      display:"flex", alignItems:"center", justifyContent:"center",
+      fontSize:size * 0.35, fontWeight:700, flexShrink:0 }}>
+      {user.username.slice(0,2).toUpperCase()}
+    </div>
+  );
+}
 
-export default function Sidebar({ user, rooms, activeRoom, onRoomSelect, onRoomsChange, onLogout }) {
-  const [showNewRoom, setShowNewRoom] = useState(false);
-  const [newName, setNewName]         = useState("");
-  const [newDesc, setNewDesc]         = useState("");
-  const [creating, setCreating]       = useState(false);
-  const [error, setError]             = useState("");
+export default function Sidebar({ user, friends, pendingRequests, activeFriend, onSelectFriend, onFriendsChange, onLogout }) {
+  const [tab, setTab]           = useState("friends");   // "friends" | "requests" | "add"
+  const [searchQ, setSearchQ]   = useState("");
+  const [results, setResults]   = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [sending, setSending]   = useState(null);        // username being requested
+  const [sent, setSent]         = useState(new Set());
+  const [msg, setMsg]           = useState("");
 
-  const colors = COLOR_MAP[user.avatar_color] || COLOR_MAP.indigo;
-  const initials = user.username.slice(0, 2).toUpperCase();
-
-  async function handleCreateRoom(e) {
-    e.preventDefault();
-    if (!newName.trim()) return;
-    setCreating(true);
-    setError("");
+  async function doSearch(q) {
+    setSearchQ(q);
+    if (!q.trim()) { setResults([]); return; }
+    setSearching(true);
     try {
-      await createRoom(newName.trim(), newDesc.trim());
-      setNewName("");
-      setNewDesc("");
-      setShowNewRoom(false);
-      onRoomsChange(); // tell App.jsx to refetch the rooms list
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setCreating(false);
-    }
+      const r = await searchUsers(q, user.id);
+      setResults(r);
+    } finally { setSearching(false); }
   }
 
-  return (
-    <aside style={styles.sidebar}>
+  async function doSendRequest(targetUsername) {
+    setSending(targetUsername);
+    try {
+      await sendFriendRequest(targetUsername, user.id);
+      setSent(prev => new Set([...prev, targetUsername]));
+      setMsg("Request sent!");
+      setTimeout(() => setMsg(""), 3000);
+    } catch (e) {
+      setMsg(e.message);
+      setTimeout(() => setMsg(""), 3000);
+    } finally { setSending(null); }
+  }
 
-      {/* App header */}
-      <div style={styles.header}>
-        <span style={styles.appName}>💬 RealChat</span>
-        <div style={styles.onlinePip} title="Connected" />
+  async function doAccept(id) {
+    await acceptRequest(id, user.id);
+    onFriendsChange();
+  }
+
+  async function doReject(id) {
+    await rejectRequest(id, user.id);
+    onFriendsChange();
+  }
+
+  const pendingCount = pendingRequests.length;
+
+  return (
+    <aside style={s.sidebar}>
+      {/* Header */}
+      <div style={s.header}>
+        <span style={s.appName}>💬 RealChat</span>
       </div>
 
-      {/* Rooms section */}
-      <div style={styles.section}>
-        <div style={styles.sectionHeader}>
-          <span style={styles.sectionLabel}>Rooms</span>
-          <button
-            style={styles.addBtn}
-            onClick={() => setShowNewRoom(!showNewRoom)}
-            title="Create new room"
-          >
-            {showNewRoom ? "✕" : "+"}
+      {/* Tabs */}
+      <div style={s.tabRow}>
+        {[["friends","Chats"],["requests",`Requests${pendingCount > 0 ? ` (${pendingCount})` : ""}`],["add","+ Add"]].map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)}
+            style={{ ...s.tabBtn, ...(tab === id ? s.tabBtnOn : {}), ...(id === "requests" && pendingCount > 0 ? {color:"#f59e0b"} : {}) }}>
+            {label}
           </button>
-        </div>
+        ))}
+      </div>
 
-        {/* New room form */}
-        {showNewRoom && (
-          <form onSubmit={handleCreateRoom} style={styles.newRoomForm}>
-            <input
-              style={styles.miniInput}
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="Room name"
-              required
-              autoFocus
-            />
-            <input
-              style={styles.miniInput}
-              value={newDesc}
-              onChange={(e) => setNewDesc(e.target.value)}
-              placeholder="Description (optional)"
-            />
-            {error && <p style={styles.miniError}>{error}</p>}
-            <button type="submit" disabled={creating} style={styles.createBtn}>
-              {creating ? "Creating…" : "Create room"}
-            </button>
-          </form>
+      <div style={s.body}>
+
+        {/* FRIENDS LIST */}
+        {tab === "friends" && (
+          friends.length === 0
+            ? <p style={s.empty}>No friends yet.<br/>Go to "+ Add" to find people.</p>
+            : friends.map(f => (
+              <button key={f.id} onClick={() => onSelectFriend(f)}
+                style={{ ...s.friendRow, ...(activeFriend?.id === f.id ? s.friendRowOn : {}) }}>
+                <Avatar user={f} size={36} />
+                <span style={s.friendName}>{f.username}</span>
+              </button>
+            ))
         )}
 
-        {/* Room list */}
-        <div style={styles.roomList}>
-          {rooms.map((room, i) => {
-            const isActive = activeRoom?.id === room.id;
-            return (
-              <button
-                key={room.id}
-                onClick={() => onRoomSelect(room)}
-                style={{
-                  ...styles.roomItem,
-                  ...(isActive ? styles.roomItemActive : {}),
-                }}
-              >
-                <span style={styles.roomIcon}>{ROOM_ICONS[i % ROOM_ICONS.length]}</span>
-                <div style={styles.roomText}>
-                  <span style={styles.roomName}>{room.name}</span>
-                  {room.description && (
-                    <span style={styles.roomDesc}>{room.description}</span>
-                  )}
+        {/* PENDING REQUESTS */}
+        {tab === "requests" && (
+          pendingRequests.length === 0
+            ? <p style={s.empty}>No pending requests.</p>
+            : pendingRequests.map(r => (
+              <div key={r.id} style={s.reqCard}>
+                <Avatar user={r.sender} size={32} />
+                <div style={{ flex:1, minWidth:0 }}>
+                  <p style={s.reqName}>{r.sender.username}</p>
+                  <p style={s.reqSub}>wants to connect</p>
                 </div>
-              </button>
-            );
-          })}
-        </div>
+                <button onClick={() => doAccept(r.id)} style={s.acceptBtn}>✓</button>
+                <button onClick={() => doReject(r.id)} style={s.rejectBtn}>✕</button>
+              </div>
+            ))
+        )}
+
+        {/* ADD FRIEND */}
+        {tab === "add" && (
+          <div style={{ padding:"0 4px" }}>
+            <input style={s.searchInput} value={searchQ}
+              onChange={e => doSearch(e.target.value)}
+              placeholder="Search username…" autoFocus />
+            {msg && <p style={{ fontSize:12, color:"#6366f1", margin:"6px 0 0" }}>{msg}</p>}
+            {searching && <p style={s.empty}>Searching…</p>}
+            {results.map(u => {
+              const isFriend  = friends.some(f => f.id === u.id);
+              const requested = sent.has(u.username);
+              return (
+                <div key={u.id} style={s.resultRow}>
+                  <Avatar user={u} size={32} />
+                  <span style={{ flex:1, fontSize:14, color:"#1e293b" }}>{u.username}</span>
+                  {isFriend
+                    ? <span style={s.alreadyTag}>Friends</span>
+                    : <button disabled={requested} onClick={() => doSendRequest(u.username)}
+                        style={{ ...s.addBtn, ...(requested ? s.addBtnDone : {}) }}>
+                        {requested ? "Sent" : "Add"}
+                      </button>}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      {/* User panel at bottom */}
-      <div style={styles.userPanel}>
-        <div
-          style={{
-            ...styles.avatar,
-            background: colors.bg,
-            color: colors.text,
-          }}
-        >
-          {initials}
+      {/* User panel */}
+      <div style={s.userPanel}>
+        <Avatar user={user} size={32} />
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={s.myName}>{user.username}</div>
+          <div style={s.online}>● online</div>
         </div>
-        <div style={styles.userInfo}>
-          <span style={styles.userName}>{user.username}</span>
-          <span style={styles.userStatus}>● online</span>
-        </div>
-        <button onClick={onLogout} style={styles.logoutBtn} title="Log out">
-          ↩
-        </button>
+        <button onClick={onLogout} style={s.logoutBtn} title="Logout">↩</button>
       </div>
     </aside>
   );
 }
 
-const styles = {
-  sidebar: {
-    width: 240,
-    background: "#1e293b",
-    display: "flex",
-    flexDirection: "column",
-    flexShrink: 0,
-    height: "100vh",
-  },
-  header: {
-    padding: "20px 16px 12px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderBottom: "1px solid #334155",
-  },
-  appName: { fontSize: 16, fontWeight: 700, color: "#f1f5f9" },
-  onlinePip: {
-    width: 8,
-    height: 8,
-    borderRadius: "50%",
-    background: "#22c55e",
-  },
-  section: { flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", padding: "12px 0" },
-  sectionHeader: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "0 16px 8px",
-  },
-  sectionLabel: { fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.08em" },
-  addBtn: {
-    background: "none",
-    border: "none",
-    color: "#64748b",
-    fontSize: 18,
-    cursor: "pointer",
-    lineHeight: 1,
-    padding: "0 2px",
-  },
-  newRoomForm: {
-    padding: "0 12px 12px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-  },
-  miniInput: {
-    padding: "7px 10px",
-    background: "#0f172a",
-    border: "1px solid #334155",
-    borderRadius: 6,
-    color: "#f1f5f9",
-    fontSize: 13,
-    outline: "none",
-  },
-  miniError: { color: "#f87171", fontSize: 12, margin: 0 },
-  createBtn: {
-    padding: "7px",
-    background: "#6366f1",
-    color: "#fff",
-    border: "none",
-    borderRadius: 6,
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: "pointer",
-  },
-  roomList: { overflowY: "auto", flex: 1, padding: "0 8px" },
-  roomItem: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    width: "100%",
-    padding: "8px 10px",
-    background: "none",
-    border: "none",
-    borderRadius: 8,
-    cursor: "pointer",
-    textAlign: "left",
-    color: "#94a3b8",
-    transition: "background 0.1s",
-    marginBottom: 2,
-  },
-  roomItemActive: {
-    background: "#334155",
-    color: "#f1f5f9",
-  },
-  roomIcon: { fontSize: 16, flexShrink: 0 },
-  roomText: { display: "flex", flexDirection: "column", minWidth: 0 },
-  roomName: { fontSize: 14, fontWeight: 500, color: "inherit", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  roomDesc: { fontSize: 11, color: "#475569", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  userPanel: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    padding: "12px 14px",
-    borderTop: "1px solid #334155",
-  },
-  avatar: {
-    width: 34,
-    height: 34,
-    borderRadius: "50%",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: 13,
-    fontWeight: 700,
-    flexShrink: 0,
-  },
-  userInfo: { flex: 1, display: "flex", flexDirection: "column", minWidth: 0 },
-  userName: { fontSize: 13, fontWeight: 600, color: "#f1f5f9", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  userStatus: { fontSize: 11, color: "#22c55e" },
-  logoutBtn: {
-    background: "none",
-    border: "none",
-    color: "#64748b",
-    fontSize: 18,
-    cursor: "pointer",
-    flexShrink: 0,
-  },
+const s = {
+  sidebar:    { width:240, background:"#1e293b", display:"flex", flexDirection:"column", height:"100vh", flexShrink:0 },
+  header:     { padding:"18px 16px 12px", borderBottom:"1px solid #334155" },
+  appName:    { fontSize:16, fontWeight:700, color:"#f1f5f9" },
+  tabRow:     { display:"flex", padding:"8px 8px 0", gap:2 },
+  tabBtn:     { flex:1, padding:"7px 4px", background:"none", border:"none", borderRadius:"8px 8px 0 0", fontSize:12, fontWeight:500, color:"#64748b", cursor:"pointer" },
+  tabBtnOn:   { background:"#0f172a", color:"#f1f5f9" },
+  body:       { flex:1, overflowY:"auto", padding:"8px" },
+  empty:      { fontSize:13, color:"#475569", textAlign:"center", lineHeight:1.6, marginTop:24 },
+  friendRow:  { display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", background:"none", border:"none", borderRadius:8, cursor:"pointer", textAlign:"left", marginBottom:2 },
+  friendRowOn:{ background:"#334155" },
+  friendName: { fontSize:14, fontWeight:500, color:"#e2e8f0", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  reqCard:    { display:"flex", alignItems:"center", gap:8, background:"#0f172a", borderRadius:10, padding:"10px 10px", marginBottom:8 },
+  reqName:    { fontSize:13, fontWeight:600, color:"#f1f5f9", margin:0 },
+  reqSub:     { fontSize:11, color:"#64748b", margin:0 },
+  acceptBtn:  { background:"#166534", color:"#fff", border:"none", borderRadius:6, padding:"5px 8px", cursor:"pointer", fontSize:13, fontWeight:700 },
+  rejectBtn:  { background:"#7f1d1d", color:"#fff", border:"none", borderRadius:6, padding:"5px 8px", cursor:"pointer", fontSize:13, fontWeight:700 },
+  searchInput:{ width:"100%", padding:"9px 12px", background:"#0f172a", border:"1px solid #334155", borderRadius:8, color:"#f1f5f9", fontSize:13, outline:"none", boxSizing:"border-box", marginBottom:8 },
+  resultRow:  { display:"flex", alignItems:"center", gap:10, padding:"8px 4px", borderBottom:"1px solid #1e293b" },
+  addBtn:     { background:"#6366f1", color:"#fff", border:"none", borderRadius:6, padding:"5px 12px", fontSize:12, fontWeight:600, cursor:"pointer" },
+  addBtnDone: { background:"#334155", cursor:"default" },
+  alreadyTag: { fontSize:11, color:"#22c55e", fontWeight:600 },
+  userPanel:  { display:"flex", alignItems:"center", gap:10, padding:"12px 14px", borderTop:"1px solid #334155" },
+  myName:     { fontSize:13, fontWeight:600, color:"#f1f5f9", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  online:     { fontSize:11, color:"#22c55e" },
+  logoutBtn:  { background:"none", border:"none", color:"#64748b", fontSize:18, cursor:"pointer" },
 };

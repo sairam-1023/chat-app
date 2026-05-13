@@ -1,18 +1,9 @@
-// =============================================================================
 // src/api/client.js
-//
-// This file is the ONLY place that knows the backend URL.
-// Every component imports from here — never writes fetch() calls directly.
-// This pattern is called the "API layer" or "service layer".
-//
-// If you ever change the backend URL or add auth headers,
-// you change it HERE and nowhere else.
-// =============================================================================
+// All HTTP calls to the FastAPI backend. Only this file knows the base URL.
 
-const BASE = "http://localhost:8000";
+const BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-// Generic helper — throws if the response is not 2xx
-async function request(path, options = {}) {
+async function req(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...options.headers },
     ...options,
@@ -24,31 +15,22 @@ async function request(path, options = {}) {
   return res.json();
 }
 
-// ---- Auth ----
-
+// Auth
 export const registerUser = (username, password, avatar_color) =>
-  request("/register", {
-    method: "POST",
-    body: JSON.stringify({ username, password, avatar_color }),
-  });
+  req("/register", { method: "POST", body: JSON.stringify({ username, password, avatar_color }) });
 
 export const loginUser = (username, password) =>
-  request("/login", {
-    method: "POST",
-    body: JSON.stringify({ username, password }),
-  });
+  req("/login", { method: "POST", body: JSON.stringify({ username, password }) });
 
-// ---- Rooms ----
+// Users
+export const searchUsers = (q, me) => req(`/users/search?q=${encodeURIComponent(q)}&me=${me}`);
 
-export const getRooms = () => request("/rooms");
+// Friend requests
+export const sendFriendRequest  = (username, me)    => req(`/friend-requests?me=${me}`, { method: "POST", body: JSON.stringify({ username }) });
+export const getPendingRequests = (me)               => req(`/friend-requests/pending?me=${me}`);
+export const acceptRequest      = (id, me)           => req(`/friend-requests/${id}/accept?me=${me}`, { method: "POST" });
+export const rejectRequest      = (id, me)           => req(`/friend-requests/${id}/reject?me=${me}`, { method: "POST" });
+export const getFriends         = (me)               => req(`/friends?me=${me}`);
 
-export const createRoom = (name, description = "") =>
-  request("/rooms", {
-    method: "POST",
-    body: JSON.stringify({ name, description }),
-  });
-
-// ---- Messages (history) ----
-
-export const getMessages = (roomId, limit = 50) =>
-  request(`/rooms/${roomId}/messages?limit=${limit}`);
+// DMs
+export const getDMHistory = (otherId, me) => req(`/dm/${otherId}?me=${me}`);
