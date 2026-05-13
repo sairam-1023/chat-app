@@ -36,25 +36,24 @@ export default function App() {
 
   // Handle all incoming WebSocket messages
   const handleWS = useCallback((data) => {
-    if (data.type === "dm") {
-      setLiveMsgs(prev => [...prev, data]);
-    } else if (data.type === "friend_request") {
-      // Someone sent me a request — show in sidebar + toast
-      setPending(prev => {
-        if (prev.find(r => r.id === data.request_id)) return prev;
-        return [...prev, {
-          id: data.request_id, status: "pending",
-          sender: data.from, receiver: user,
-          created_at: new Date().toISOString(),
-        }];
-      });
-      showToast(`📩 ${data.from.username} sent you a friend request`);
-    } else if (data.type === "request_accepted") {
-      // My request was accepted — add to friends + toast
-      setFriends(prev => prev.find(f => f.id === data.friend.id) ? prev : [...prev, data.friend]);
-      showToast(`✅ ${data.friend.username} accepted your request!`);
-    }
-  }, [user]);
+  if (data.type === "dm") {
+    setLiveMsgs(prev => [...prev, data]);
+  } else if (data.type === "friend_request") {
+    setPending(prev => {
+      if (prev.find(r => r.id === data.request_id)) return prev;
+      return [...prev, {
+        id: data.request_id, status: "pending",
+        sender: data.from, receiver: user,
+        created_at: new Date().toISOString(),
+      }];
+    });
+    showToast(`📩 ${data.from.username} sent you a friend request`);
+  } else if (data.type === "request_accepted") {
+    // Refetch full friends list so sidebar updates for BOTH users
+    refreshData();
+    showToast(`✅ ${data.friend.username} accepted your request!`);
+  }
+}, [user]);
 
   const { send: sendWS } = useWebSocket(user?.id, handleWS);
 
