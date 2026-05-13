@@ -212,7 +212,7 @@ app = FastAPI(title="RealChat API", version="1.0")
 # This middleware adds headers so the browser permits the requests.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", os.getenv("FRONTEND_URL", ""),],
+    allow_origins=["http://localhost:5173","https://chat-app-sigma-ten-81.vercel.app", os.getenv("FRONTEND_URL", ""),],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
